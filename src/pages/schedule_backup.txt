@@ -1,0 +1,469 @@
+// src/pages/Schedule.jsx
+import { useState, useMemo, useEffect, useCallback } from 'react'
+import {
+  ChevronLeft, ChevronRight, Plus, X, Clock, Tag,
+  Calendar, Edit3, Trash2, RepeatIcon, Check,
+} from 'lucide-react'
+import {
+  format, addMonths, subMonths, startOfMonth, endOfMonth,
+  eachDayOfInterval, isSameMonth, isSameDay, getDay, isToday, addDays,
+} from 'date-fns'
+import api from '../api'
+
+const COLORS = [
+  { key: 'cyan',    label: 'Cyan',    value: '#00E5FF', bg: 'rgba(0,229,255,0.12)' },
+  { key: 'violet',  label: 'Violet',  value: '#7C3AED', bg: 'rgba(124,58,237,0.15)' },
+  { key: 'emerald', label: 'Emerald', value: '#10B981', bg: 'rgba(16,185,129,0.12)' },
+  { key: 'amber',   label: 'Amber',   value: '#F59E0B', bg: 'rgba(245,158,11,0.12)' },
+  { key: 'rose',    label: 'Rose',    value: '#F43F5E', bg: 'rgba(244,63,94,0.12)' },
+]
+const CATEGORIES = ['Work', 'Study', 'Meeting', 'Personal', 'Health', 'Other']
+const HOURS = Array.from({ length: 16 }, (_, i) => i + 7) // 7am–10pm
+const TIMELINE_START = 7 * 60
+const TIMELINE_PIXELS_PER_MINUTE = 1.2
+
+const getColor = (key) => COLORS.find(c => c.key === key) || COLORS[0]
+
+// ── EVENT MODAL ───────────────────────────────────────────────────────────────
+function EventModal({ event, selectedDate, onSave, onClose }) {
+  const [form, setForm] = useState(event || {
+    title: '', date: format(selectedDate, 'yyyy-MM-dd'),
+    time: '09:00', duration: 60, color: 'cyan',
+    category: 'Work', notes: '', recurring: 'none',
+  })
+  const [saving, setSaving] = useState(false)
+  const colorObj = getColor(form.color)
+
+  const handleSave = async () => {
+    if (!form.title.trim()) return
+    setSaving(true)
+    await onSave(form)
+    setSaving(false)
+  }
+
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal">
+        <div className="flex items-center justify-between" style={{ marginBottom: 20 }}>
+          <h2 style={{ fontFamily: 'var(--font-display)', fontSize: 18, fontWeight: 700 }}>
+            {event ? 'Edit Event' : 'New Event'}
+          </h2>
+          <button className="btn btn-ghost btn-icon" onClick={onClose}><X size={16} /></button>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 6, fontFamily: 'var(--font-display)' }}>Event Title *</label>
+            <input className="input" value={form.title} onChange={e => setForm(p => ({ ...p, title: e.target.value }))} placeholder="What's this event?" autoFocus />
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 6, fontFamily: 'var(--font-display)' }}>Date</label>
+              <input type="date" className="input" value={form.date} onChange={e => setForm(p => ({ ...p, date: e.target.value }))} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 6, fontFamily: 'var(--font-display)' }}>Start Time</label>
+              <input type="time" className="input" value={form.time} onChange={e => setForm(p => ({ ...p, time: e.target.value }))} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 6, fontFamily: 'var(--font-display)' }}>Duration (min)</label>
+              <select className="input" value={form.duration} onChange={e => setForm(p => ({ ...p, duration: +e.target.value }))} style={{ cursor: 'pointer' }}>
+                {[15, 30, 45, 60, 90, 120, 180, 240].map(d => <option key={d} value={d}>{d >= 60 ? `${Math.floor(d/60)}h${d%60 ? ` ${d%60}m` : ''}` : `${d}m`}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 6, fontFamily: 'var(--font-display)' }}>Category</label>
+              <select className="input" value={form.category} onChange={e => setForm(p => ({ ...p, category: e.target.value }))} style={{ cursor: 'pointer' }}>
+                {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 6, fontFamily: 'var(--font-display)' }}>Recurring</label>
+              <select className="input" value={form.recurring} onChange={e => setForm(p => ({ ...p, recurring: e.target.value }))} style={{ cursor: 'pointer' }}>
+                <option value="none">None</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 8, fontFamily: 'var(--font-display)' }}>Color</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {COLORS.map(c => (
+                <div key={c.key} onClick={() => setForm(p => ({ ...p, color: c.key }))} style={{
+                  width: 28, height: 28, borderRadius: 8, background: c.value, cursor: 'pointer',
+                  border: form.color === c.key ? '3px solid white' : '3px solid transparent',
+                  boxShadow: form.color === c.key ? `0 0 0 2px ${c.value}` : 'none',
+                  transform: form.color === c.key ? 'scale(1.15)' : 'scale(1)',
+                  transition: 'all 0.15s', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  {form.color === c.key && <Check size={12} color="white" />}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 6, fontFamily: 'var(--font-display)' }}>Notes</label>
+            <textarea className="input" value={form.notes} onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} placeholder="Optional notes..." rows={2} style={{ resize: 'none' }} />
+          </div>
+        </div>
+
+        <div className="flex gap-3 justify-end" style={{ marginTop: 22 }}>
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving || !form.title.trim()}>
+            {saving ? 'Saving…' : event ? 'Save changes' : 'Create event'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── MAIN COMPONENT ────────────────────────────────────────────────────────────
+export default function Schedule() {
+  const [currentMonth, setCurrentMonth] = useState(new Date())
+  const [selectedDate, setSelectedDate] = useState(new Date())
+  const [events, setEvents] = useState([])
+  const [modal, setModal] = useState(null)
+  const [view, setView] = useState('month')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  const fetchSchedules = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const data = await api.get('/schedule')
+      setEvents(Array.isArray(data) ? data : [])
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchSchedules() }, [fetchSchedules])
+
+  const eventsForDate = (date) => events.filter(e => e.date === format(date, 'yyyy-MM-dd'))
+
+  const selectedEvents = useMemo(() =>
+    events.filter(e => e.date === format(selectedDate, 'yyyy-MM-dd'))
+          .sort((a, b) => a.time.localeCompare(b.time))
+  , [events, selectedDate])
+
+  const saveEvent = async (eventData) => {
+    const isEdit = !!eventData._id
+    try {
+      if (isEdit) {
+        const updated = await api.put(`/schedule/${eventData._id}`, eventData)
+        setEvents(prev => prev.map(e => e._id === updated._id ? updated : e))
+      } else {
+        const created = await api.post('/schedule', eventData)
+        setEvents(prev => [...prev, created])
+      }
+      setModal(null)
+    } catch (err) {
+      alert('Error saving event: ' + err.message)
+    }
+  }
+
+  const deleteEvent = async (id) => {
+    setEvents(prev => prev.filter(e => e._id !== id))
+    try {
+      await api.delete(`/schedule/${id}`)
+    } catch (err) {
+      alert('Error deleting event: ' + err.message)
+      fetchSchedules()
+    }
+  }
+
+  const monthDays = useMemo(() => {
+    const start = startOfMonth(currentMonth)
+    const end = endOfMonth(currentMonth)
+    return eachDayOfInterval({ start, end })
+  }, [currentMonth])
+
+  const timeToMinutes = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m }
+
+  if (loading) return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 300, flexDirection: 'column', gap: 12, color: 'var(--text-muted)' }}>
+      <div style={{ width: 32, height: 32, border: '3px solid var(--border)', borderTopColor: 'var(--accent-cyan)', borderRadius: '50%', animation: 'spin-slow 0.8s linear infinite' }} />
+      Loading schedule…
+    </div>
+  )
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20, animation: 'fadeUp 0.4s ease' }}>
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 26, fontWeight: 800, letterSpacing: '-0.03em' }}>Schedule</h1>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginTop: 2 }}>
+            {format(selectedDate, 'EEEE, MMMM d')} · {selectedEvents.length} events
+          </p>
+        </div>
+        <div className="flex gap-2 items-center">
+          <div style={{ display: 'flex', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: 3, gap: 2 }}>
+            {['month', 'day'].map(v => (
+              <button key={v} onClick={() => setView(v)} style={{
+                padding: '5px 14px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                fontSize: 12, fontFamily: 'var(--font-display)', fontWeight: 600, transition: 'all 0.15s', textTransform: 'capitalize',
+                background: view === v ? 'var(--bg-secondary)' : 'transparent',
+                color: view === v ? 'var(--text-primary)' : 'var(--text-muted)',
+              }}>{v}</button>
+            ))}
+          </div>
+          <button className="btn btn-primary btn-sm" onClick={() => setModal('new')}>
+            <Plus size={14} /> Add Event
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div style={{ background: 'rgba(244,63,94,0.1)', border: '1px solid rgba(244,63,94,0.2)', borderRadius: 8, padding: '10px 14px', color: 'var(--accent-rose)', fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>Failed to load schedule: {error}</span>
+          <button className="btn btn-ghost btn-sm" onClick={fetchSchedules}>Retry</button>
+        </div>
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 20 }}>
+        {/* Calendar / Day view */}
+        <div>
+          {/* Month navigation */}
+          <div className="stat-card" style={{ marginBottom: 16, padding: '14px 18px' }}>
+            <div className="flex items-center justify-between" style={{ marginBottom: 14 }}>
+              <h2 style={{ fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 700 }}>
+                {format(currentMonth, 'MMMM yyyy')}
+              </h2>
+              <div className="flex gap-2">
+                <button className="btn btn-ghost btn-icon" onClick={() => setCurrentMonth(subMonths(currentMonth, 1))}><ChevronLeft size={16} /></button>
+                <button className="btn btn-ghost btn-sm" onClick={() => { setCurrentMonth(new Date()); setSelectedDate(new Date()) }}>Today</button>
+                <button className="btn btn-ghost btn-icon" onClick={() => setCurrentMonth(addMonths(currentMonth, 1))}><ChevronRight size={16} /></button>
+              </div>
+            </div>
+
+            {/* Day headers */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 4, marginBottom: 8 }}>
+              {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
+                <div key={d} style={{ textAlign: 'center', fontSize: 11, fontFamily: 'var(--font-display)', fontWeight: 700, color: 'var(--text-muted)', padding: '4px 0' }}>{d}</div>
+              ))}
+            </div>
+
+            {/* Calendar grid */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 4 }}>
+              {/* Leading blanks */}
+              {Array.from({ length: getDay(startOfMonth(currentMonth)) }).map((_, i) => (
+                <div key={`blank-${i}`} />
+              ))}
+              {monthDays.map(day => {
+                const dayEvs = eventsForDate(day)
+                const selected = isSameDay(day, selectedDate)
+                const today = isToday(day)
+                return (
+                  <div key={day.toISOString()} className="cal-day" style={{
+                    cursor: 'pointer', borderRadius: 8, padding: '6px 4px',
+                    background: selected ? 'var(--accent-violet)' : today ? 'var(--accent-cyan-dim)' : 'transparent',
+                    color: selected ? 'white' : today ? 'var(--accent-cyan)' : 'var(--text-primary)',
+                    fontWeight: today || selected ? 700 : 400,
+                    fontSize: 13, textAlign: 'center', position: 'relative',
+                    transition: 'all 0.15s',
+                  }}
+                    onClick={() => { setSelectedDate(day); setView('day') }}
+                    onMouseEnter={e => { if (!selected) e.currentTarget.style.background = 'var(--bg-card-hover)' }}
+                    onMouseLeave={e => { if (!selected) e.currentTarget.style.background = today ? 'var(--accent-cyan-dim)' : 'transparent' }}
+                  >
+                    {format(day, 'd')}
+                    {dayEvs.length > 0 && (
+                      <div style={{ position: 'absolute', bottom: 2, left: '50%', transform: 'translateX(-50%)', display: 'flex', gap: 2 }}>
+                        {dayEvs.slice(0, 3).map((ev, i) => (
+                          <div key={i} style={{ width: 4, height: 4, borderRadius: '50%', background: getColor(ev.color).value }} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* Day timeline view */}
+          {view === 'day' && (
+            <div className="stat-card" style={{ padding: 0, overflow: 'hidden' }}>
+              <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 700 }}>
+                  {format(selectedDate, 'EEEE, MMMM d')}
+                </h3>
+                <button className="btn btn-ghost btn-sm" onClick={() => setModal('new')}><Plus size={12} /> Add</button>
+              </div>
+              <div style={{ position: 'relative', padding: '8px 0', overflowY: 'auto', maxHeight: 520 }}>
+                {HOURS.map(hour => (
+                  <div key={hour} style={{ display: 'flex', alignItems: 'flex-start', minHeight: 60, borderTop: '1px solid var(--border)', position: 'relative' }}>
+                    <div style={{ width: 52, flexShrink: 0, padding: '4px 8px', fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', textAlign: 'right' }}>
+                      {hour === 12 ? '12 PM' : hour > 12 ? `${hour - 12} PM` : `${hour} AM`}
+                    </div>
+                    <div style={{ flex: 1, position: 'relative', minHeight: 60 }}>
+                      {selectedEvents.filter(ev => {
+                        const [h] = ev.time.split(':').map(Number)
+                        return h === hour
+                      }).map(ev => {
+                        const colorObj = getColor(ev.color)
+                        const mins = timeToMinutes(ev.time)
+                        const topOffset = ((mins % 60) / 60) * 60
+                        const heightPx = Math.max(24, (ev.duration / 60) * 60)
+                        return (
+                          <div key={ev._id} style={{
+                            position: 'absolute', top: topOffset, left: 8, right: 8,
+                            background: colorObj.bg, border: `1px solid ${colorObj.value}40`,
+                            borderLeft: `3px solid ${colorObj.value}`,
+                            borderRadius: 6, padding: '4px 8px', zIndex: 2,
+                            minHeight: heightPx, cursor: 'pointer', transition: 'all 0.15s',
+                          }}
+                            onMouseEnter={e => e.currentTarget.style.opacity = '0.85'}
+                            onMouseLeave={e => e.currentTarget.style.opacity = '1'}
+                          >
+                            <div style={{ fontSize: 12, fontWeight: 600, color: colorObj.value, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ev.title}</div>
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)', display: 'flex', gap: 6, marginTop: 2 }}>
+                              <Clock size={9} /> {ev.time} · {ev.duration >= 60 ? `${Math.floor(ev.duration/60)}h${ev.duration%60 ? ` ${ev.duration%60}m` : ''}` : `${ev.duration}m`}
+                              {ev.recurring !== 'none' && <><RepeatIcon size={9} /> {ev.recurring}</>}
+                            </div>
+                            <div style={{ position: 'absolute', top: 4, right: 4, display: 'flex', gap: 2 }}>
+                              <button className="btn btn-ghost btn-icon" style={{ width: 20, height: 20 }} onClick={e => { e.stopPropagation(); setModal(ev) }}><Edit3 size={9} /></button>
+                              <button className="btn btn-ghost btn-icon" style={{ width: 20, height: 20, color: 'var(--accent-rose)' }} onClick={e => { e.stopPropagation(); deleteEvent(ev._id) }}><Trash2 size={9} /></button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Month day events list */}
+          {view === 'month' && (
+            <div className="stat-card" style={{ padding: 0, overflow: 'hidden' }}>
+              <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 700 }}>
+                  {format(selectedDate, 'MMMM d')} · {selectedEvents.length} events
+                </h3>
+                <button className="btn btn-ghost btn-sm" onClick={() => setModal('new')}><Plus size={12} /> Add</button>
+              </div>
+              {selectedEvents.length === 0 ? (
+                <div style={{ padding: '32px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                  <div style={{ fontSize: 28, marginBottom: 8 }}>📅</div>
+                  <p>No events on this day</p>
+                  <button className="btn btn-ghost btn-sm" style={{ marginTop: 12 }} onClick={() => setModal('new')}>Add event</button>
+                </div>
+              ) : (
+                <div style={{ padding: '8px 0' }}>
+                  {selectedEvents.map(ev => {
+                    const colorObj = getColor(ev.color)
+                    return (
+                      <div key={ev._id} style={{ padding: '10px 18px', display: 'flex', gap: 12, alignItems: 'flex-start', transition: 'background 0.15s', cursor: 'pointer' }}
+                        onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-card-hover)'}
+                        onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                      >
+                        <div style={{ width: 3, height: 40, borderRadius: 2, background: colorObj.value, flexShrink: 0, marginTop: 4 }} />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 3 }}>{ev.title}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <Clock size={9} /> {ev.time} · {ev.duration >= 60 ? `${Math.floor(ev.duration/60)}h${ev.duration%60 ? ` ${ev.duration%60}m` : ''}` : `${ev.duration}m`}
+                            {ev.recurring !== 'none' && <><RepeatIcon size={9} /> {ev.recurring}</>}
+                          </div>
+                          {ev.notes && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ev.notes}</div>}
+                        </div>
+                        <div className="flex gap-1">
+                          <button className="btn btn-ghost btn-icon" style={{ width: 24, height: 24 }} onClick={e => { e.stopPropagation(); setModal(ev) }}><Edit3 size={10} /></button>
+                          <button className="btn btn-ghost btn-icon" style={{ width: 24, height: 24, color: 'var(--accent-rose)' }} onClick={e => { e.stopPropagation(); deleteEvent(ev._id) }}><Trash2 size={10} /></button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Right sidebar */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Upcoming 7 days */}
+          <div className="stat-card">
+            <div style={{ fontFamily: 'var(--font-display)', fontSize: 13, fontWeight: 700, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Calendar size={13} color="var(--accent-cyan)" /> Upcoming 7 Days
+            </div>
+            {Array.from({ length: 7 }, (_, i) => addDays(new Date(), i)).map(day => {
+              const dayEvs = eventsForDate(day)
+              if (dayEvs.length === 0 && i > 2) return null
+              return (
+                <div key={day.toISOString()} className="flex items-center gap-3" style={{ marginBottom: 8, cursor: 'pointer' }}
+                  onClick={() => { setSelectedDate(day); setView('day') }}
+                >
+                  <div style={{ width: 36, height: 36, borderRadius: 8, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: isToday(day) ? 'var(--accent-cyan-dim)' : 'var(--bg-secondary)', border: `1px solid ${isToday(day) ? 'rgba(0,229,255,0.2)' : 'var(--border)'}`, flexShrink: 0 }}>
+                    <div style={{ fontSize: 8, fontFamily: 'var(--font-display)', fontWeight: 700, color: isToday(day) ? 'var(--accent-cyan)' : 'var(--text-muted)', textTransform: 'uppercase' }}>{format(day, 'EEE')}</div>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: isToday(day) ? 'var(--accent-cyan)' : 'var(--text-primary)', lineHeight: 1 }}>{format(day, 'd')}</div>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {dayEvs.length === 0 ? (
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No events</div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                        {dayEvs.slice(0, 2).map(ev => (
+                          <div key={ev._id} className="flex items-center gap-2">
+                            <div style={{ width: 4, height: 4, borderRadius: '50%', background: getColor(ev.color).value, flexShrink: 0 }} />
+                            <span style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-secondary)' }}>{ev.title}</span>
+                          </div>
+                        ))}
+                        {dayEvs.length > 2 && <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>+{dayEvs.length - 2} more</div>}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          {/* Category breakdown */}
+          <div className="stat-card">
+            <div style={{ fontFamily: 'var(--font-display)', fontSize: 13, fontWeight: 700, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Tag size={13} color="var(--accent-violet)" /> By Category
+            </div>
+            {CATEGORIES.map(cat => {
+              const count = events.filter(e => e.category === cat).length
+              if (count === 0) return null
+              const pct = events.length > 0 ? Math.round((count / events.length) * 100) : 0
+              return (
+                <div key={cat} style={{ marginBottom: 8 }}>
+                  <div className="flex justify-between items-center" style={{ marginBottom: 4 }}>
+                    <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{cat}</span>
+                    <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>{count}</span>
+                  </div>
+                  <div className="progress-bar">
+                    <div className="progress-fill" style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+              )
+            })}
+            {events.length === 0 && <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>No events yet</p>}
+          </div>
+        </div>
+      </div>
+
+      {modal && (
+        <EventModal
+          event={modal === 'new' ? null : modal}
+          selectedDate={selectedDate}
+          onSave={saveEvent}
+          onClose={() => setModal(null)}
+        />
+      )}
+    </div>
+  )
+}
